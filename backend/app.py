@@ -30,12 +30,15 @@ def after_request(response):
 
 
 load_dotenv()
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GEMINI_API_KEY:
-    print("WARNING: GEMINI_API_KEY not found in environment variables")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print("GEMINI_API_KEY loaded successfully.")
+else:
+    print("WARNING: GEMINI_API_KEY not set. AI features will be disabled.")
 
-genai.configure(api_key=GEMINI_API_KEY)
 
 
 def extract_video_id(url):
