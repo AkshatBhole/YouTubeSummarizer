@@ -1,8 +1,6 @@
+gunicorn
 flask
 flask-cors
-youtube-transcript-api
-google-generativeai
 python-dotenv
-yt-dlp
-openai-whisper
-gunicorn
+google-generativeai
+youtube-transcript-api
