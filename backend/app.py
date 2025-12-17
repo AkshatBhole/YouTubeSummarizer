@@ -7,6 +7,9 @@ from flask_cors import CORS
 import google.generativeai as genai
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+import yt_dlp
+import requests
+import re
 
 
 app = Flask(__name__)
@@ -104,7 +107,105 @@ def _parse_transcript_result(transcript_json):
          return " ".join([t.get('text', '') for t in transcript_data])
     return str(transcript_data)
 
-# --- Layer 2: Translated Captions (Stub) ---
+# --- Layer 2: yt-dlp Fallback ---
+def _parse_json3(data):
+    # json3 format: events -> segs -> utf8
+    text = []
+    for event in data.get('events', []):
+        segs = event.get('segs', [])
+        if segs:
+             line = "".join([s.get('utf8', '') for s in segs])
+             text.append(line)
+    return " ".join(text)
+
+def _parse_vtt(vtt_text):
+    lines = vtt_text.splitlines()
+    text = []
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        if '-->' in line: continue
+        if line.startswith('WEBVTT'): continue
+        if line.startswith('Kind:'): continue
+        if line.startswith('Language:'): continue
+        # timestamps look like 00:00:00.000
+        
+        # Simple regex for tags
+        clean_line = re.sub(r'<[^>]+>', '', line)
+        if clean_line:
+            text.append(clean_line)
+            
+    # Deduplicate adjacent for VTT (rolling captions style)
+    deduped = []
+    if text:
+        deduped.append(text[0])
+        for i in range(1, len(text)):
+            if text[i] != text[i-1]:
+                deduped.append(text[i])
+    return " ".join(deduped)
+
+def _get_transcript_ytdlp(video_id):
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        ydl_opts = {
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+            'cookiefile': 'cookies.txt', # Harmless if missing
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"[Layer 2] Exploring with yt-dlp for {video_id}...")
+            info = ydl.extract_info(url, download=False)
+            
+            subs = info.get('subtitles', {})
+            auto_subs = info.get('automatic_captions', {})
+            
+            # Helper to find url
+            def get_best_url(sub_dict, lang_code):
+                if lang_code in sub_dict:
+                    # Prefer json3, then vtt, then ttml
+                    formats = sub_dict[lang_code]
+                    for fmt in formats:
+                        if fmt.get('ext') == 'json3': return fmt.get('url'), 'json3'
+                    for fmt in formats:
+                        if fmt.get('ext') == 'vtt': return fmt.get('url'), 'vtt'
+                return None, None
+
+            # 1. Try Manual English
+            target_url, fmt_type = get_best_url(subs, 'en')
+            # 2. Try Auto English
+            if not target_url:
+                target_url, fmt_type = get_best_url(auto_subs, 'en')
+                
+            # 3. Fallback to any 'en' key
+            if not target_url:
+                all_subs = {**subs, **auto_subs}
+                for lang in all_subs:
+                    if lang.startswith('en'):
+                        target_url, fmt_type = get_best_url(all_subs, lang)
+                        if target_url: break
+
+            if target_url:
+                print(f"[Layer 2] Fetching subs from URL ({fmt_type})")
+                r = requests.get(target_url)
+                if r.status_code == 200:
+                    if fmt_type == 'json3':
+                        return _parse_json3(r.json())
+                    elif fmt_type == 'vtt':
+                        return _parse_vtt(r.text)
+                    else:
+                        # Fallback for others? assuming text
+                        return r.text
+            
+            print("[Layer 2] No suitable subtitles found via yt-dlp.")
+            return None
+            
+    except Exception as e:
+        print(f"[Layer 2] yt-dlp extraction failed: {e}")
+        return None
+
+# --- Layer 3: Translated Stub ---
 def _get_translated_transcript(video_id):
     # Merged into Layer 1 for simplicity with this library version
     return None
@@ -114,7 +215,11 @@ def get_transcript(video_id):
     text = _get_native_transcript(video_id)
     if text: return text
     
-    # 2. Translated (Placeholder / merged into Layer 1 logic for this lib)
+    # 2. Fallback to yt-dlp (Robust Method)
+    text = _get_transcript_ytdlp(video_id)
+    if text: return text
+    
+    # 3. Translated (Stub)
     text = _get_translated_transcript(video_id)
     if text: return text
     
@@ -144,8 +249,8 @@ def generate_ai_content(text1, text2):
     3. **Long Videos**: Break down content into as many distinct topics as necessary to be exhaustive.
     4. **Coverage**: Do not miss any section.
     
-    Transcript 1: {text1[:200000]}... (truncated)
-    Transcript 2: {text2[:200000]}... (truncated)
+    Transcript 1: {text1[:350000]}... (truncated)
+    Transcript 2: {text2[:350000]}... (truncated)
 
     Output MUST be valid JSON with this exact structure:
     {{
